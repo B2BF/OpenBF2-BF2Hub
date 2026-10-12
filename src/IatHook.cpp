@@ -1,4 +1,5 @@
 #include "IatHook.h"
+#include "Hook.h"
 
 #include <cstdint>
 #include <cstring>
@@ -57,6 +58,13 @@ void* patchIatImport(HMODULE image, const char* dllName, const char* procName, v
         }
     }
     return nullptr;
+}
+
+bool installImportHook(const char* symbol, void* replacement, void** outReal) {
+    void* real = patchIatImport(::GetModuleHandleA(nullptr), "dice_py.dll", symbol, replacement);
+    if (outReal)
+        *outReal = real;
+    return real != nullptr;
 }
 
 } // namespace bf2hub

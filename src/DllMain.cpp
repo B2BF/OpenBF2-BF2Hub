@@ -1,31 +1,30 @@
-// Entry point. The shipped bf2hub.dll does all its work from DllMain (sub_10001730) and exports no
-// initDll, so OpenBF2's `openbf2.addModDll bf2hub` loader keeps it resident after DllMain has run.
-// We follow that contract exactly: no initDll export here.
+// Entry point. The module does all its work from the OS load hook and exports no initDll, so
+// OpenBF2's `openbf2.addModDll bf2hub` loader keeps it resident after the hook has run - the
+// contract the engine documents for a DllMain/constructor-based integration.
 //
-// On PROCESS_ATTACH, if we are inside a dedicated server (bf2_w32ded/bf2_w64ded), we:
-//   1. load bf2hub.cfg,
-//   2. install the dice_py IAT hooks so our bf2hublib / bf2.bf2hub modules get injected when the
-//      engine brings Python up (this must happen before Python init - hence loading from
-//      openbf2.con / ServerSettings.con), and
-//   3. start the BF2Hub "hello" heartbeat thread.
+//   * Windows: DllMain(PROCESS_ATTACH/DETACH) - the shipped bf2hub.dll model (sub_10001730).
+//   * Linux:   an .init_array constructor / .fini_array destructor - the shipped libbf2hub.so model.
 //
-// We deliberately reproduce only the DllMain payload the integration needs; the ws2_32 socket proxy
-// the retail DLL also is (its exported winsock thunks) is handled elsewhere and is not built here.
+// On attach, inside a dedicated server, we load bf2hub.cfg, install the dice_py import hooks (IAT
+// patch on Windows, GOT patch on Linux) so our bf2hublib / bf2.bf2hub modules get injected when the
+// engine brings Python up, and start the snapshot worker and the "hello" heartbeat. The ws2_32 /
+// socket proxy the retail images also are is intentionally not built here.
 
 #include "Config.h"
 #include "Heartbeat.h"
 #include "HostImage.h"
 #include "Log.h"
+#include "Platform.h"
 #include "PythonModule.h"
 #include "Session.h"
 #include "Snapshot.h"
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-
 #include <cstring>
 #include <new>
+
+#ifndef BF2HUB_ARCH
+#  define BF2HUB_ARCH "unknown"
+#endif
 
 namespace {
 
@@ -33,6 +32,9 @@ bf2hub::Config*  g_config = nullptr;
 bf2hub::Session* g_session = nullptr;
 
 void serverStartup() {
+    if (!bf2hub::hostIsDedicated())
+        return;
+
     g_config = new (std::nothrow) bf2hub::Config();
     g_session = new (std::nothrow) bf2hub::Session();
     if (!g_config || !g_session)
@@ -58,12 +60,17 @@ void serverShutdown() {
 
 } // namespace
 
+#if defined(_WIN32)
+
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
 BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID /*reserved*/) {
     switch (reason) {
     case DLL_PROCESS_ATTACH:
         ::DisableThreadLibraryCalls(hinst);
-        if (bf2hub::hostIsDedicated())
-            serverStartup();
+        serverStartup();
         break;
     case DLL_PROCESS_DETACH:
         serverShutdown();
@@ -73,3 +80,15 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID /*reserved*/) {
     }
     return TRUE;
 }
+
+#else
+
+__attribute__((constructor)) static void bf2hubOnLoad() {
+    serverStartup();
+}
+
+__attribute__((destructor)) static void bf2hubOnUnload() {
+    serverShutdown();
+}
+
+#endif

@@ -60,9 +60,12 @@ referenceExe = C:\path\to\patched\bf2_w32ded.exe
 ```
 
 The dedicated-server detection also accepts `w64ded` (not just the retail `w32ded`) so the x64 server is
-recognised.
+recognised. (The exe fingerprint is a **Windows** concern only — the Linux heartbeat uses a fixed key,
+not an exe hash; see *Linux* below.)
 
 ## Building
+
+### Windows (`bf2hub.dll`)
 
 Requires MSVC (x86 and/or x64), CMake ≥ 3.21, Ninja, and the architecture-matched `dice_py.lib` from the
 OpenBF2 Python build (the module links against the engine's embedded CPython 2.3.4 so its `PyObject`
@@ -84,24 +87,55 @@ Run the configure step from a matching Visual Studio developer environment (`VsD
 `-arch=x64`). The build writes `bf2hub.dll` into `out/build/<preset>/`. Set `-DBF2HUB_STAGE_DIR=<game dir>`
 to copy it next to the server automatically.
 
+### Linux (`libbf2hub.so`)
+
+Requires GCC/Clang, CMake ≥ 3.21, Ninja. No `dice_py` import library is needed: the CPython symbols
+stay undefined in the `.so` and resolve at load time from `libdice_py.so` already in the server
+process, exactly as the retail `libbf2hub.so` does.
+
+```bash
+cmake --preset linux-x64
+cmake --build --preset linux-x64        # -> out/build/linux-x64/libbf2hub.so
+```
+
+⚠ Build on (or for) the **target server's glibc**. The BF2 Linux dedicated server runs on an old
+glibc; a `.so` built against a newer glibc will reference symbol versions the target cannot resolve.
+Build on a distro matching the server, or with an appropriate sysroot.
+
 ## Installing
 
-1. Put the matching `bf2hub.dll` in the dedicated server's working directory (next to the exe).
-2. Put a genuine retail `bf2_w32ded.exe` somewhere and set `referenceExe` in `bf2hub.cfg`.
-3. Add `openbf2.addModDll bf2hub` to the mod's `openbf2.con` / `ServerSettings.con`.
+1. Put the matching module next to the server: `bf2hub.dll` on Windows, `libbf2hub.so` on Linux.
+2. Windows only: optionally set `referenceExe` in `bf2hub.cfg` (defaults to the embedded fingerprint).
+3. Add `openbf2.addModDll bf2hub` to the mod's `openbf2.con` / `ServerSettings.con`. It resolves to
+   `.\bf2hub.dll` on Windows and `libbf2hub.so` on Linux.
 4. Logs are written to `logs/bf2hub/<date>.log`.
 
 ## Platforms
 
-Windows x86 and x64 build today. The Linux port (`libbf2hub.so`, x86/x64) is planned; CMake refuses to
-configure on non-Windows hosts until it exists.
+Windows x86 and x64 (`bf2hub.dll`) and Linux x86-64 (`libbf2hub.so`) all build. The two share the
+engine logic (MD5, session, Python methods, MACs, snapshot packing); they differ only where the OS or
+the BF2Hub protocol version does:
+
+| | Windows `bf2hub.dll` | Linux `libbf2hub.so` |
+|---|---|---|
+| Load hook | `DllMain` | `.init_array` constructor |
+| Import hook | IAT patch | GOT patch |
+| Threads | Win32 | pthread/std |
+| Exe path | `GetModuleFileNameA` | `readlink("/proc/self/exe")` |
+| Heartbeat | `HHHL3Q` + exe fingerprint | `HHHL2Q` + fixed 32-byte key |
+| `glsGetAuthInfo` | present (returns empty) | absent (not in the Linux table) |
+
+The Linux `libbf2hub.so` is a distinct, simpler retail build than the Windows DLL; this port
+reproduces its protocol (notably the fixed-key `HHHL2Q` heartbeat — ELF has no PE fingerprint, so
+there is nothing to spoof there).
 
 ## Status
 
 Implemented, from the recovered `dice_py` ABI and the shipped routines:
 
-* module injection (the `dice_py` IAT hooks, `bf2hublib` registration, `bf2.bf2hub` import),
-* host detection and the executable fingerprint blob,
+* module injection (the `dice_py` import hook — IAT patch on Windows, GOT patch on Linux —
+  `bf2hublib` registration, `bf2.bf2hub` import),
+* host detection and the executable fingerprint blob (Windows),
 * the MD5 (standard and the keyed heartbeat variant) — verified against the RFC 1321 test vectors,
 * the "hello" heartbeat packet and sender,
 * `glsGetFlags`, `glsGetHostname`, `glsGetDocument`, `netaddr`, `log`,
@@ -121,9 +155,21 @@ Faithful boundaries (the shipped behaviour in our configuration, not stubs):
   separately-handled transport. Until an external layer fills them they are zero — the same packet the
   retail code sends before its GameSpy auth completes.
 
-Remaining validation: the MAC byte layouts are reconstructed from fresh Hex-Rays decompiles and the MD5
-is test-vector-correct, but the end-to-end exchange has **not yet been checked against a live BF2Hub
-backend capture**. That is the next step before relying on ranking in production.
+Remaining validation: the Windows MAC byte layouts are reconstructed from fresh Hex-Rays decompiles and
+the MD5 is test-vector-correct, but the end-to-end exchange has **not yet been checked against a live
+BF2Hub backend capture**. That is the next step before relying on ranking in production.
+
+### Linux specifics
+
+The Linux build reuses the same methods/MACs (they match the Windows binary) through the platform
+shims above. Two Linux items still want a wire capture to confirm:
+
+* the **`HHHL2Q` heartbeat payload layout** (`src/Heartbeat.cpp`, from `sub_721D`) — the tag, port
+  29960, magic `1367436204`, host `servers.bf2hub.com` and the fixed 32-byte key are certain, but the
+  exact field order inside the 32-byte payload is reconstructed from a decompile whose signature IDA
+  could not fully recover; it is marked `[FRONTIER]` in the source;
+* `gpaGetString` folds the MD5 of `/proc/self/exe` (the running `bf2`), matching the retail `.so`;
+  unlike Windows there is no embedded reference hash, so this is the real server binary's hash.
 
 ## License
 

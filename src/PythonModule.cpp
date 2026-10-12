@@ -2,10 +2,11 @@
 
 #include "Config.h"
 #include "Heartbeat.h"
+#include "Hook.h"
 #include "HostImage.h"
-#include "IatHook.h"
 #include "Log.h"
 #include "Md5.h"
+#include "Platform.h"
 #include "PyAbi.h"
 #include "Session.h"
 #include "Snapshot.h"
@@ -16,10 +17,9 @@
 #include <ctime>
 #include <string>
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <winsock2.h>
+#if !defined(_WIN32)
+#  include <sys/stat.h>
+#endif
 
 namespace bf2hub {
 namespace {
@@ -128,7 +128,7 @@ int settingInt(const char* name) {
 // A nonzero random byte, matching the shipped generator (sub_10001E00: rand(), floored to 1).
 uint8_t randByteNonzero() {
     static bool seeded = false;
-    if (!seeded) { std::srand(static_cast<unsigned>(std::time(nullptr)) ^ ::GetTickCount()); seeded = true; }
+    if (!seeded) { std::srand(static_cast<unsigned>(std::time(nullptr))); seeded = true; }
     int r = std::rand();
     return static_cast<uint8_t>(r >= 1 ? r : 1);
 }
@@ -427,9 +427,11 @@ PyObject* glsSendSnapshot(PyObject*, PyObject* args) {
 // separately and not built here, so the cache is empty and the faithful result is the retail
 // no-data return: an empty string. This is the shipped behaviour when no auth has been captured,
 // not a stub.
+#if defined(_WIN32)
 PyObject* glsGetAuthInfo(PyObject*, PyObject*) {
     return PyString_FromString("");
 }
+#endif
 
 // netaddr (sub_100072F0): resolve a stats hostname (by index) to a dotted-decimal IP string.
 PyObject* netaddr(PyObject*, PyObject* args) {
@@ -471,15 +473,25 @@ PyMethodDef g_methods[] = {
     { "glsGetHostname",     glsGetHostname,     BF2HUB_METH_VARARGS, nullptr },
     { "glsGetDocument",     glsGetDocument,     BF2HUB_METH_VARARGS, nullptr },
     { "glsSendSnapshot",    glsSendSnapshot,    BF2HUB_METH_VARARGS, nullptr },
+#if defined(_WIN32)
+    // The Linux libbf2hub.so table has no glsGetAuthInfo; its token comes from the ws2 proxy's
+    // per-player auth cache, which neither build reproduces. Kept Windows-only for table parity
+    // with the retail DLL.
     { "glsGetAuthInfo",     glsGetAuthInfo,     BF2HUB_METH_VARARGS, nullptr },
+#endif
     { "netaddr",            netaddr,            BF2HUB_METH_VARARGS, nullptr },
     { "log",                pyLog,              BF2HUB_METH_VARARGS, nullptr },
     { nullptr, nullptr, 0, nullptr },
 };
 
 bool fileExists(const char* path) {
+#if defined(_WIN32)
     DWORD a = ::GetFileAttributesA(path);
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+#else
+    struct stat st;
+    return ::stat(path, &st) == 0 && (st.st_mode & S_IFREG);
+#endif
 }
 
 // --- hook thunks ----------------------------------------------------------
@@ -514,13 +526,14 @@ void installPythonHooks(Config* config, Session* session) {
     g_config = config;
     g_session = session;
 
-    HMODULE host = ::GetModuleHandleA(nullptr);
-    g_realInitModule4 = reinterpret_cast<Py_InitModule4_t>(
-        patchIatImport(host, "dice_py.dll", "Py_InitModule4", reinterpret_cast<void*>(&initModule4Hook)));
-    g_realImportModule = reinterpret_cast<PyImport_ImportModule_t>(
-        patchIatImport(host, "dice_py.dll", "PyImport_ImportModule", reinterpret_cast<void*>(&importModuleHook)));
+    void* real1 = nullptr;
+    void* real2 = nullptr;
+    bool ok1 = installImportHook("Py_InitModule4", reinterpret_cast<void*>(&initModule4Hook), &real1);
+    bool ok2 = installImportHook("PyImport_ImportModule", reinterpret_cast<void*>(&importModuleHook), &real2);
+    g_realInitModule4 = reinterpret_cast<Py_InitModule4_t>(real1);
+    g_realImportModule = reinterpret_cast<PyImport_ImportModule_t>(real2);
 
-    if (!g_realInitModule4 || !g_realImportModule) {
+    if (!ok1 || !ok2 || !g_realInitModule4 || !g_realImportModule) {
         logLine("installPythonHooks: could not hook dice_py imports (InitModule4=%p ImportModule=%p)\r\n",
                 reinterpret_cast<void*>(g_realInitModule4), reinterpret_cast<void*>(g_realImportModule));
     } else {

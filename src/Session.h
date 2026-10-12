@@ -22,6 +22,7 @@
 #ifndef BF2HUB_SESSION_H
 #define BF2HUB_SESSION_H
 
+#include <cstddef>
 #include <cstdint>
 
 namespace bf2hub {

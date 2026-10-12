@@ -2,18 +2,16 @@
 
 #include "Log.h"
 #include "Md5.h"
+#include "Platform.h"
 #include "Session.h"
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <winsock2.h>
-
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <deque>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -37,11 +35,10 @@ struct Request {
     int retries = 0;
 };
 
-CRITICAL_SECTION g_lock;
-bool             g_lockInit = false;
+std::mutex          g_lock;
 std::deque<Request> g_queue;
-HANDLE           g_thread = nullptr;
-volatile LONG    g_stop = 0;
+Thread              g_thread;
+std::atomic<bool>   g_stop{false};
 
 uint8_t randByteNonzero() {
     int r = std::rand();
@@ -158,57 +155,56 @@ bool httpPost(Request& req) {
     if (!buildHeader(req, sendOffset, sendLen))
         return false;
 
-    hostent* he = ::gethostbyname(kConnectHost);
-    if (!he || !he->h_addr_list || !he->h_addr_list[0])
+    uint32_t ips[8];
+    int n = resolveHostIPv4(kConnectHost, ips, 8);
+    if (n < 1)
         return false;
 
-    SOCKET s = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (s == INVALID_SOCKET)
+    socket_t s = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (s == kInvalidSocket)
         return false;
 
     sockaddr_in to;
     std::memset(&to, 0, sizeof(to));
     to.sin_family = AF_INET;
     to.sin_port = htons(80);
-    to.sin_addr.s_addr = *reinterpret_cast<uint32_t*>(he->h_addr_list[0]);
+    to.sin_addr.s_addr = ips[0];
     if (::connect(s, reinterpret_cast<sockaddr*>(&to), sizeof(to)) != 0) {
-        ::closesocket(s);
+        closeSock(s);
         return false;
     }
 
     const char* buf = reinterpret_cast<const char*>(req.body.data() + sendOffset);
     size_t sent = 0;
     while (sent < sendLen) {
-        int n = ::send(s, buf + sent, static_cast<int>(sendLen - sent), 0);
-        if (n <= 0) { ::closesocket(s); return false; }
-        sent += static_cast<size_t>(n);
+        int wn = static_cast<int>(::send(s, buf + sent, static_cast<int>(sendLen - sent), 0));
+        if (wn <= 0) { closeSock(s); return false; }
+        sent += static_cast<size_t>(wn);
     }
 
     char reply[1024];
-    int got = ::recv(s, reply, static_cast<int>(sizeof(reply) - 1), 0);
-    ::closesocket(s);
+    int got = static_cast<int>(::recv(s, reply, static_cast<int>(sizeof(reply) - 1), 0));
+    closeSock(s);
     if (got <= 0)
         return false;
     reply[got] = '\0';
     return std::strstr(reply, " 200 OK") != nullptr;
 }
 
-DWORD WINAPI threadMain(LPVOID) {
-    WSADATA wsa;
-    ::WSAStartup(MAKEWORD(2, 2), &wsa);
+void threadMain() {
+    std::srand(static_cast<unsigned>(std::time(nullptr)));
 
-    std::srand(static_cast<unsigned>(::GetTickCount()));
-
-    while (::InterlockedCompareExchange(&g_stop, 0, 0) == 0) {
+    while (!g_stop.load()) {
         Request req;
         bool have = false;
-        ::EnterCriticalSection(&g_lock);
-        if (!g_queue.empty()) {
-            req = std::move(g_queue.front());
-            g_queue.pop_front();
-            have = true;
+        {
+            std::lock_guard<std::mutex> lk(g_lock);
+            if (!g_queue.empty()) {
+                req = std::move(g_queue.front());
+                g_queue.pop_front();
+                have = true;
+            }
         }
-        ::LeaveCriticalSection(&g_lock);
 
         if (have) {
             if (httpPost(req)) {
@@ -216,59 +212,48 @@ DWORD WINAPI threadMain(LPVOID) {
                         static_cast<unsigned long>(req.payloadSize));
             } else if (++req.retries <= 10) {
                 logLine("SNAPSHOT: could not send request - requeued\r\n");
-                ::EnterCriticalSection(&g_lock);
-                g_queue.push_back(std::move(req));
-                ::LeaveCriticalSection(&g_lock);
-                ::Sleep(1000);
+                {
+                    std::lock_guard<std::mutex> lk(g_lock);
+                    g_queue.push_back(std::move(req));
+                }
+                sleepMs(1000);
             } else {
                 logLine("SNAPSHOT: giving up on request after %d retries\r\n", req.retries);
             }
         } else {
-            ::Sleep(1000);
+            sleepMs(1000);
         }
     }
-
-    ::WSACleanup();
-    return 0;
 }
 
 } // namespace
 
 bool queueSnapshot(const Session& session, const uint8_t* data, size_t len) {
-    if (!g_lockInit)
+    if (!g_thread.running())
         return false;
     Request req;
     packInto(req, session, data, len);
     if (req.body.empty())
         return false;
-    ::EnterCriticalSection(&g_lock);
+    std::lock_guard<std::mutex> lk(g_lock);
     g_queue.push_back(std::move(req));
-    ::LeaveCriticalSection(&g_lock);
     return true;
 }
 
 void startSnapshotWorker() {
-    if (g_thread)
+    if (g_thread.running())
         return;
-    if (!g_lockInit) {
-        ::InitializeCriticalSection(&g_lock);
-        g_lockInit = true;
-    }
-    g_stop = 0;
-    g_thread = ::CreateThread(nullptr, 0, threadMain, nullptr, 0, nullptr);
+    g_stop.store(false);
+    netStartup();
+    g_thread.start(&threadMain);
 }
 
 void stopSnapshotWorker() {
-    if (!g_thread)
+    if (!g_thread.running())
         return;
-    ::InterlockedExchange(&g_stop, 1);
-    ::WaitForSingleObject(g_thread, 3000);
-    ::CloseHandle(g_thread);
-    g_thread = nullptr;
-    if (g_lockInit) {
-        ::DeleteCriticalSection(&g_lock);
-        g_lockInit = false;
-    }
+    g_stop.store(true);
+    g_thread.join(3000);
+    netCleanup();
 }
 
 } // namespace bf2hub

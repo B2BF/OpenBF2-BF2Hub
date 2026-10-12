@@ -2,10 +2,11 @@
 
 #include "Config.h"
 #include "Md5.h"
+#include "Platform.h"
 
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
+#if defined(_WIN32)
+#  include <windows.h>
+#endif
 
 #include <cctype>
 #include <cstdio>
@@ -15,7 +16,9 @@
 namespace bf2hub {
 
 // Embedded fingerprint of the BF2Hub-patched retail bf2_w32ded.exe, measured from the operator's
-// known-good copy (see HostImage.h). Used as the default so no reference exe is needed on disk.
+// known-good copy (see HostImage.h). The Windows build reports this by default so no reference exe is
+// needed on disk. The Linux heartbeat does not send an exe fingerprint at all (it uses a fixed key),
+// so this is Windows-relevant; it is kept here for the shared Fingerprint type.
 const Fingerprint kEmbeddedFingerprint = {
     46,
     0x00905A4Du,   // "MZ\x90\0"
@@ -29,19 +32,13 @@ const Fingerprint kEmbeddedFingerprint = {
 
 namespace {
 
-std::string runningExePath() {
-    char path[MAX_PATH];
-    path[0] = '\0';
-    ::GetModuleFileNameA(nullptr, path, sizeof(path));
-    path[sizeof(path) - 1] = '\0';
-    return std::string(path);
-}
-
+#if defined(_WIN32)
 std::string toLower(std::string s) {
     for (char& c : s)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
 }
+#endif
 
 // Stream a whole file through classic MD5. Returns total byte count (0 on open failure) and, via
 // firstDword, the first four bytes of the file.
@@ -77,31 +74,24 @@ bool md5File(const char* path, uint8_t digest[16], uint32_t& fileSize, uint32_t&
     return true;
 }
 
+#if defined(_WIN32)
+
 // Parse the PE at `path` and return the .text section's raw size and file offset. Mirrors
-// sub_10002210: DOS header -> e_lfanew -> PE signature -> section table -> first ".text".
+// sub_10002210: DOS header -> e_lfanew -> PE signature -> section table -> first ".text". PE-only,
+// so Windows-only; the Linux build uses the embedded fingerprint and never measures a PE.
 bool findTextSection(const char* path, uint32_t& rawSize, uint32_t& rawPtr) {
     std::FILE* f = nullptr;
-#if defined(_MSC_VER)
     ::fopen_s(&f, path, "rb");
-#else
-    f = std::fopen(path, "rb");
-#endif
     if (!f)
         return false;
-
-    struct Closer {
-        std::FILE* f;
-        ~Closer() { if (f) std::fclose(f); }
-    } closer{f};
+    struct Closer { std::FILE* f; ~Closer() { if (f) std::fclose(f); } } closer{f};
 
     IMAGE_DOS_HEADER dos{};
     if (std::fread(&dos, sizeof(dos), 1, f) != 1 || dos.e_magic != IMAGE_DOS_SIGNATURE)
         return false;
-
     if (std::fseek(f, dos.e_lfanew, SEEK_SET) != 0)
         return false;
 
-    // Read signature + file header; the optional header size tells us where the section table is.
     DWORD signature = 0;
     IMAGE_FILE_HEADER fileHeader{};
     if (std::fread(&signature, sizeof(signature), 1, f) != 1 || signature != IMAGE_NT_SIGNATURE)
@@ -129,11 +119,7 @@ bool findTextSection(const char* path, uint32_t& rawSize, uint32_t& rawPtr) {
 
 bool md5FileRegion(const char* path, uint32_t offset, uint32_t size, uint8_t digest[16]) {
     std::FILE* f = nullptr;
-#if defined(_MSC_VER)
     ::fopen_s(&f, path, "rb");
-#else
-    f = std::fopen(path, "rb");
-#endif
     if (!f)
         return false;
     struct Closer { std::FILE* f; ~Closer() { if (f) std::fclose(f); } } closer{f};
@@ -161,24 +147,29 @@ std::string resolveReferenceExe(const Config& config) {
     std::string ref = config.get(kReferenceExeKey);
     if (!ref.empty())
         return ref;
-    // Fallback: a genuine retail bf2_w32ded.exe the operator placed in the game folder. (The
-    // running exe may have the same name but is OpenBF2's build, which is exactly what we must not
-    // fingerprint - see HostImage.h.)
     return "bf2_w32ded.exe";
 }
+
+#endif // _WIN32
 
 } // namespace
 
 bool hostIsDedicated() {
-    std::string name = toLower(runningExePath());
+#if defined(_WIN32)
+    std::string name = toLower(hostExePath());
     return name.find("w32ded") != std::string::npos ||
            name.find("w64ded") != std::string::npos;
+#else
+    // The Linux port only targets the dedicated server (`bf2`); OpenBF2 has no Linux client image,
+    // and the module is loaded into the server via openbf2.addModDll. Treat as dedicated.
+    return true;
+#endif
 }
 
 std::string runningExeMd5Hex() {
     uint8_t digest[16];
     uint32_t size = 0, first = 0;
-    if (!md5File(runningExePath().c_str(), digest, size, first))
+    if (!md5File(hostExePath().c_str(), digest, size, first))
         return std::string();
     char hex[33];
     md5HexLower(digest, hex);
@@ -186,6 +177,7 @@ std::string runningExeMd5Hex() {
 }
 
 bool referenceExeWholeMd5(const Config& config, uint8_t out[16]) {
+#if defined(_WIN32)
     // Default: the embedded fingerprint's whole-file MD5 (no reference exe needed).
     if (config.get(kReferenceExeKey).empty()) {
         std::memcpy(out, kEmbeddedFingerprint.wholeMd5, 16);
@@ -205,9 +197,29 @@ bool referenceExeWholeMd5(const Config& config, uint8_t out[16]) {
     cached = true;
     std::memcpy(out, digest, 16);
     return true;
+#else
+    // The Linux gpaGetString folds the MD5 of the running executable (/proc/self/exe), matching the
+    // retail .so (there is no embedded reference exe on Linux). Cached after the first read.
+    (void)config;
+    static bool cached = false;
+    static uint8_t cachedDigest[16];
+    if (cached) {
+        std::memcpy(out, cachedDigest, 16);
+        return true;
+    }
+    uint8_t digest[16];
+    uint32_t size = 0, first = 0;
+    if (!md5File(hostExePath().c_str(), digest, size, first))
+        return false;
+    std::memcpy(cachedDigest, digest, 16);
+    cached = true;
+    std::memcpy(out, digest, 16);
+    return true;
+#endif
 }
 
 bool buildFingerprint(const Config& config, Fingerprint& out) {
+#if defined(_WIN32)
     // Default: the embedded patched-retail fingerprint, so operators need no reference exe.
     if (config.get(kReferenceExeKey).empty()) {
         out = kEmbeddedFingerprint;
@@ -238,6 +250,13 @@ bool buildFingerprint(const Config& config, Fingerprint& out) {
     std::memcpy(out.wholeMd5, wholeDigest, 16);
     std::memcpy(out.textMd5, textDigest, 16);
     return true;
+#else
+    // The Linux heartbeat uses a fixed key, not an exe fingerprint, so the blob is never sent on
+    // Linux; return the embedded constant for any shared caller.
+    (void)config;
+    out = kEmbeddedFingerprint;
+    return true;
+#endif
 }
 
 } // namespace bf2hub
