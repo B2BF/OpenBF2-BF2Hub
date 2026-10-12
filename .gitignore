@@ -1,0 +1,43 @@
+# Build output
+/out/
+/build/
+/cmake-build-*/
+CMakeUserPresets.json
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+*.cmake.stamp
+
+# MSVC / Windows build artifacts
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.so
+*.map
+*.idb
+*.res
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.sln
+*.vcxproj*
+
+# OS / editor noise
+Thumbs.db
+Desktop.ini
+*.swp
+*~
+
+# Project runtime output (never commit logs or a staged game-dir copy)
+/logs/
+bf2hub.cfg

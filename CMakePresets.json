@@ -1,0 +1,34 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "msvc-x86",
+      "displayName": "BF2Hub module - MSVC x86",
+      "description": "Builds bf2hub.dll for the x86 engine (bf2_w32ded.exe). Use with the x86 MSVC toolchain.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "architecture": { "value": "x86", "strategy": "external" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "msvc-x64",
+      "displayName": "BF2Hub module - MSVC x64",
+      "description": "Builds bf2hub.dll for the x64 engine (bf2_w64ded.exe). Use with the x64 MSVC toolchain.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "architecture": { "value": "x64", "strategy": "external" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "msvc-x86", "configurePreset": "msvc-x86", "targets": ["bf2hub"] },
+    { "name": "msvc-x64", "configurePreset": "msvc-x64", "targets": ["bf2hub"] }
+  ]
+}
