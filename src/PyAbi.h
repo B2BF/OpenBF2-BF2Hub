@@ -27,17 +27,24 @@ struct PyObject {
 };
 
 // The 2.3 PyTypeObject begins with PyObject_VAR_HEAD (ob_refcnt, ob_type, ob_size) then
-// tp_name/tp_basicsize/tp_itemsize/tp_dealloc. We lay out exactly that prefix so tp_dealloc lands at
-// offset 24 (x86) / 48 (x64) - the slot the shipped code dereferences when it inlines Py_DECREF.
+// tp_name/tp_basicsize/tp_itemsize/tp_dealloc. In CPython 2.3 ob_size/tp_basicsize/tp_itemsize are C
+// `int` (Py_ssize_t did not arrive until 2.5), so they MUST be `int` here, not `long`: on LP64 Linux
+// `long` is 8 bytes and would push tp_dealloc from offset 40 to 48 - the tp_print slot - which the
+// inlined Py_DECREF then calls through as a garbage function pointer and crashes. With `int` the slot
+// lands correctly on every target: offset 24 (x86), 40 (x64, both LP64 and LLP64).
 struct PyTypeObject {
     int           ob_refcnt;
     PyTypeObject* ob_type;
-    long          ob_size;
+    int           ob_size;
     const char*   tp_name;
-    long          tp_basicsize;
-    long          tp_itemsize;
+    int           tp_basicsize;
+    int           tp_itemsize;
     destructor    tp_dealloc;
 };
+
+// tp_dealloc is the slot the inlined Py_DECREF calls through; a wrong offset crashes. Lock it down.
+static_assert(offsetof(PyTypeObject, tp_dealloc) == (sizeof(void*) == 8 ? 40 : 24),
+              "PyTypeObject.tp_dealloc offset must match CPython 2.3 (int size fields)");
 
 typedef PyObject* (*PyCFunction)(PyObject*, PyObject*);
 
