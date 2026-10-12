@@ -89,14 +89,23 @@ to copy it next to the server automatically.
 
 ### Linux (`libbf2hub.so`)
 
-Requires GCC/Clang, CMake ≥ 3.21, Ninja. No `dice_py` import library is needed: the CPython symbols
-stay undefined in the `.so` and resolve at load time from `libdice_py.so` already in the server
-process, exactly as the retail `libbf2hub.so` does.
+Requires GCC/Clang, CMake ≥ 3.21, Ninja.
 
 ```bash
 cmake --preset linux-x64
 cmake --build --preset linux-x64        # -> out/build/linux-x64/libbf2hub.so
 ```
+
+The CPython symbols live in `libdice_py.so`; the module declares it as a `DT_NEEDED` dependency (as
+the retail `libbf2hub.so` does) so the loader resolves them at load time — otherwise the server aborts
+with `undefined symbol: PyExc_ValueError`. To record that dependency without a dice_py import library,
+the build generates a tiny link-time **stub** `libdice_py.so` in the build directory; the real
+`libdice_py.so` in the server process provides the symbols at run time.
+
+> **Ship only `libbf2hub.so`.** The `libdice_py.so` in the build directory is a throwaway build-time
+> stub — never copy it next to the server (it would shadow the real one). `-DBF2HUB_STAGE_DIR=` copies
+> only `libbf2hub.so`. If you prefer to link the real library instead of the stub, pass
+> `-DBF2HUB_DICE_PY=/path/to/libdice_py.so`.
 
 ⚠ Build on (or for) the **target server's glibc**. The BF2 Linux dedicated server runs on an old
 glibc; a `.so` built against a newer glibc will reference symbol versions the target cannot resolve.

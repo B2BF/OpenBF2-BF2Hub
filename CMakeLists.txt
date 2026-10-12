@@ -101,10 +101,40 @@ else()
     # The engine's addModDll resolves "bf2hub" to lib<stem>.so, so keep the default "lib" prefix:
     # the output is libbf2hub.so.
     target_compile_options(bf2hub PRIVATE -Wall -Wextra -fvisibility=hidden -fno-rtti)
+    # Keep libdl/libpthread in DT_NEEDED even on glibc that folds them into libc, for old targets.
     target_link_libraries(bf2hub PRIVATE dl pthread)
-    # Allow the Py_* symbols to remain undefined (resolved at runtime). This is the default for a
-    # shared object; make it explicit so a stray -Wl,--no-undefined elsewhere cannot break it.
-    target_link_options(bf2hub PRIVATE "LINKER:--allow-shlib-undefined")
+    target_link_options(bf2hub PRIVATE "LINKER:--no-as-needed" "LINKER:--allow-shlib-undefined")
+
+    # The CPython symbols live in libdice_py.so. The retail libbf2hub.so lists libdice_py.so in its
+    # DT_NEEDED so the loader pulls those symbols in; without that entry the server aborts with
+    # "undefined symbol: PyExc_ValueError" when it loads the module. We reproduce the DT_NEEDED
+    # either by linking the real libdice_py.so (preferred, BF2HUB_DICE_PY), or by linking a generated
+    # link-time stub whose SONAME is libdice_py.so (the real library in the server process resolves
+    # the symbols at run time - the stub is never shipped or loaded).
+    set(BF2HUB_DICE_PY "" CACHE FILEPATH "Path to the real libdice_py.so (optional; a stub is used if unset)")
+    if(BF2HUB_DICE_PY AND EXISTS "${BF2HUB_DICE_PY}")
+        target_link_libraries(bf2hub PRIVATE "${BF2HUB_DICE_PY}")
+    else()
+        set(_stub_cpp "${CMAKE_BINARY_DIR}/dice_py_stub.cpp")
+        file(WRITE "${_stub_cpp}"
+"/* Auto-generated link-time stub. Defines the CPython 2.3 symbols libbf2hub.so imports so the\n"
+" * linker records DT_NEEDED libdice_py.so; the real libdice_py.so provides them at run time. */\n"
+"extern \"C\" {\n"
+"#define F(n) void n(void){}\n"
+"#define D(n) void* n = 0;\n"
+"F(PyObject_CallMethod) F(PyLong_FromLong) F(PyString_FromString) F(PyString_AsString)\n"
+"F(PyArg_ParseTuple) F(PyString_FromFormat) F(PyType_IsSubtype) F(PyErr_Format)\n"
+"D(_Py_ZeroStruct) D(_Py_NoneStruct) D(_Py_TrueStruct) D(PyModule_Type) D(PyString_Type)\n"
+"D(PyExc_RuntimeError) D(PyExc_ValueError) D(PyExc_TypeError) D(PyExc_IndexError)\n"
+"}\n")
+        add_library(dice_py_stub SHARED "${_stub_cpp}")
+        set_target_properties(dice_py_stub PROPERTIES OUTPUT_NAME dice_py)  # -> libdice_py.so, SONAME libdice_py.so
+        target_link_libraries(bf2hub PRIVATE dice_py_stub)
+    endif()
+
+    # Do not bake the build directory into the module's RUNPATH: libdice_py.so must resolve from the
+    # server's own environment at run time, never from (or to) the build-time stub.
+    set_target_properties(bf2hub PROPERTIES SKIP_BUILD_RPATH ON BUILD_WITH_INSTALL_RPATH ON INSTALL_RPATH "")
 endif()
 
 # ---------------------------------------------------------------------------
