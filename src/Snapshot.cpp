@@ -122,10 +122,31 @@ void packInto(Request& req, const Session& s, const uint8_t* data, size_t len) {
 // sub_10004B80. Returns false if the header did not fit the reserve.
 bool buildHeader(Request& req, size_t& sendOffset, size_t& sendLen) {
     const uint32_t now = static_cast<uint32_t>(std::time(nullptr));
+    // X-BF2Hub-tsdata. Half 1 (both platforms): the XOR quad of the session auth words.
     char tsdata[0x50];
-    std::snprintf(tsdata, sizeof(tsdata), "%.8x%.8x%.8x%.8x",
+    int tn = std::snprintf(tsdata, sizeof(tsdata), "%.8x%.8x%.8x%.8x",
                   req.authB ^ 0xE4D471A2u, req.authA ^ 0x7645E8CCu,
                   req.sessionTime ^ 0xE4D471A2u, now ^ 0x7645E8CCu);
+#if !defined(_WIN32)
+    // Half 2 (Linux sub_49E6): MD5(authB | authA | sessionTime | now | providerId), appended as hex,
+    // so the Linux tsdata is 64 hex chars, not 32.
+    {
+        Md5 c;
+        c.init();
+        c.update(&req.authB, 4);
+        c.update(&req.authA, 4);
+        c.update(&req.sessionTime, 4);
+        c.update(&now, 4);
+        c.update(req.providerId.data(), req.providerId.size());
+        uint8_t dg[16];
+        c.final(dg);
+        char hex[33];
+        md5HexLower(dg, hex);
+        std::snprintf(tsdata + tn, sizeof(tsdata) - tn, "%s", hex);
+    }
+#else
+    (void)tn;
+#endif
 
     char header[1000];
     int hlen = std::snprintf(header, sizeof(header),
