@@ -30,6 +30,22 @@ const Fingerprint kEmbeddedFingerprint = {
       0x08, 0x58, 0x75, 0xcd, 0x4c, 0x66, 0x86, 0xbe },  // .text MD5
 };
 
+#if !defined(_WIN32)
+// Whole-file MD5 of the genuine retail Linux `bf2` executable. The Linux auth token (sub_5433)
+// folds this into MAC #4; OpenBF2's own binary hashes differently, so without the retail value the
+// backend rejects the token. Measure it with tools/bf2_exe_md5.py on a genuine retail `bf2` and fill
+// it in here (set kLinuxExeMd5Known = true), or point the `referenceExe` config key at a copy of the
+// retail bf2. Until then the module falls back to hashing the running binary, which will not match.
+// Measured from the genuine retail Linux `bf2` (md5 416f65cd9987f41d519c281a033e0b3f) with
+// tools/bf2_exe_md5.py. Default for Linux so operators need no reference exe on disk; overridable
+// with the referenceExe config key.
+const bool    kLinuxExeMd5Known = true;
+const uint8_t kLinuxExeMd5[16] = {
+    0x41, 0x6f, 0x65, 0xcd, 0x99, 0x87, 0xf4, 0x1d,
+    0x51, 0x9c, 0x28, 0x1a, 0x03, 0x3e, 0x0b, 0x3f,
+};
+#endif
+
 namespace {
 
 #if defined(_WIN32)
@@ -198,9 +214,10 @@ bool referenceExeWholeMd5(const Config& config, uint8_t out[16]) {
     std::memcpy(out, digest, 16);
     return true;
 #else
-    // The Linux gpaGetString folds the MD5 of the running executable (/proc/self/exe), matching the
-    // retail .so (there is no embedded reference exe on Linux). Cached after the first read.
-    (void)config;
+    // The Linux auth token folds md5(the bf2 executable) into MAC #4. Priority:
+    //   1. referenceExe config override - md5 a copy of the genuine retail bf2 on disk;
+    //   2. the embedded retail hash (kLinuxExeMd5) once measured;
+    //   3. fallback: the running binary (/proc/self/exe) - will NOT match the backend.
     static bool cached = false;
     static uint8_t cachedDigest[16];
     if (cached) {
@@ -209,8 +226,16 @@ bool referenceExeWholeMd5(const Config& config, uint8_t out[16]) {
     }
     uint8_t digest[16];
     uint32_t size = 0, first = 0;
-    if (!md5File(hostExePath().c_str(), digest, size, first))
-        return false;
+    const std::string ref = config.get(kReferenceExeKey);
+    if (!ref.empty()) {
+        if (!md5File(ref.c_str(), digest, size, first))
+            return false;
+    } else if (kLinuxExeMd5Known) {
+        std::memcpy(digest, kLinuxExeMd5, 16);
+    } else {
+        if (!md5File(hostExePath().c_str(), digest, size, first))
+            return false;
+    }
     std::memcpy(cachedDigest, digest, 16);
     cached = true;
     std::memcpy(out, digest, 16);

@@ -256,7 +256,16 @@ PyObject* gpaGetString(PyObject*, PyObject*) {
 
     char out[200];
     std::memset(out, 0, sizeof(out));
-    out[0] = 'R'; out[1] = '4'; out[2] = '-';
+    // Token version prefix. The Windows DLL (sub_10005FF0) emits "R4-"; the Linux .so (sub_5433)
+    // emits "R3-" - the same protocol-version skew as the heartbeat tag (HHHL3Q vs HHHL2Q). The
+    // backend validates the exact string, so this must match the platform's binary.
+    out[0] = 'R';
+#if defined(_WIN32)
+    out[1] = '4';
+#else
+    out[1] = '3';
+#endif
+    out[2] = '-';
     md5HexLower(s.challenge, out + 3);    // [3..34]
     md5HexLower(obf,         out + 35);   // [35..66]
     md5HexLower(d1,          out + 67);   // [67..98]

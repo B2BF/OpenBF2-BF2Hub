@@ -27,11 +27,14 @@ private:
     std::map<std::string, std::string> values_;
 };
 
-// [CHOSEN, not recovered] Optional config key. By default the module reports an embedded fingerprint
-// of the BF2Hub-patched retail bf2_w32ded.exe (HostImage::kEmbeddedFingerprint), so operators need
-// nothing on disk. Set this only to re-measure a different patched exe:
-//
-//     referenceExe = C:\path\to\patched\bf2_w32ded.exe
+// [CHOSEN, not recovered] Optional config key, one per platform.
+//   Windows: by default the module reports an embedded fingerprint of the BF2Hub-patched retail
+//            bf2_w32ded.exe; set this only to re-measure a different patched exe.
+//            referenceExe = C:\path\to\patched\bf2_w32ded.exe
+//   Linux:   the auth token folds md5(the bf2 executable), which the backend checks against the
+//            retail bf2 hash. Point this at a copy of the genuine retail `bf2` so the token matches
+//            (or embed the hash in HostImage::kLinuxExeMd5).
+//            referenceExe = /path/to/retail/bf2
 extern const char* const kReferenceExeKey;
 
 } // namespace bf2hub
